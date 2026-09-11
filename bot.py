@@ -17,85 +17,29 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
-user_checklists = {}
 user_reminders = {}
 user_states = {}
 
-
-# --- ЧЕК-ЛИСТ ІНТЕРФЕЙС ---
-
-def render_checklist(user_id: int):
-    checklist_data = user_checklists.get(user_id, {})
-    title = checklist_data.get("title", "Чек-лист")
-    items = checklist_data.get("items", [])
-
-    if not items:
-        return "✨ **Список порожній**", None
-
-    # Лаконічний заголовок з вашою назвою
-    header = f"📋 **{title.upper()}**\n\n"
-
-    keyboard = []
-    for idx, item in enumerate(items):
-        if item["done"]:
-            btn_text = f"✨  ~{item['text']}~"
-        else:
-            btn_text = f"🔘  {item['text']}"
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"toggle_{idx}")])
-
-    keyboard.append([
-        InlineKeyboardButton("➕ Додати", callback_data="add_item"),
-        InlineKeyboardButton("🗑 Видалити", callback_data="delete_all")
-    ])
-
-    return header, InlineKeyboardMarkup(keyboard)
+# Словник для розпізнавання днів тижня (понеділок = 0, неділя = 6)
+WEEKDAYS_MAP = {
+    "понеділок": 0, "пон": 0, "пн": 0,
+    "вівторок": 1, "вів": 1, "вт": 1,
+    "середа": 2, "сер": 2, "ср": 2,
+    "четвер": 3, "чт": 3,
+    "п'ятниця": 4, "пятниця": 4, "пт": 4,
+    "субота": 5, "суб": 5, "сб": 5,
+    "неділя": 6, "нед": 6, "нд": 6,
+}
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "✨ **Бот Чек-листів та Нагадувань**\n\n"
-        "• **Створити чек-лист:** `Назва: пункт 1, пункт 2`\n"
-        "• **Нагадування:** `/remind Назва 18:30`\n"
+        "⏰ **Бот Нагадувань**\n\n"
+        "• **Створити нагадування:** `/remind Назва 18:30`\n"
+        "  *(можна додавати: `щодня`, `щотижня в понеділок, середу 10:00`)*\n"
         "• **Мої нагадування:** `/myreminders`"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
-
-
-async def create_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    raw_text = update.message.text.strip()
-
-    if user_states.get(user_id, {}).get("step") == "WAITING_FOR_TEXT":
-        await process_remind_text(update, context)
-        return
-    elif user_states.get(user_id, {}).get("step") == "WAITING_FOR_DATETIME":
-        await process_remind_datetime(update, context)
-        return
-
-    if ":" in raw_text:
-        title_part, items_part = raw_text.split(":", 1)
-        title = title_part.strip()
-    else:
-        title = "Чек-лист"
-        items_part = raw_text
-
-    delimiter = "," if "," in items_part else "\n"
-    items_list = [item.strip().lstrip("-*• ") for item in items_part.split(delimiter) if item.strip()]
-
-    if not items_list:
-        return
-
-    user_checklists[user_id] = {
-        "title": title,
-        "items": [{"text": item, "done": False} for item in items_list]
-    }
-
-    text, reply_markup = render_checklist(user_id)
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=reply_markup,
-    )
 
 
 # --- НАГАДУВАННЯ (/remind) ---
@@ -116,26 +60,33 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await parse_and_schedule_reminder(update, context, full_text)
 
 
-async def process_remind_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text.strip()
+    state = user_states.get(user_id, {}).get("step")
 
-    user_states[user_id]["text"] = text
-    user_states[user_id]["step"] = "WAITING_FOR_DATETIME"
+    if state == "WAITING_FOR_TEXT":
+        text = update.message.text.strip()
+        user_states[user_id]["text"] = text
+        user_states[user_id]["step"] = "WAITING_FOR_DATETIME"
+        await update.message.reply_text(
+            "📅 **Час нагадування** (`18:30`, або з повторенням `щотижня у вівторок, четвер 15:00`):",
+            parse_mode="Markdown",
+        )
+    elif state == "WAITING_FOR_DATETIME":
+        dt_text = update.message.text.strip()
+        remind_text = user_states[user_id].get("text", "Нагадування")
+        full_text = f"{remind_text} {dt_text}"
+        await parse_and_schedule_reminder(update, context, full_text)
 
-    await update.message.reply_text(
-        "📅 **Час нагадування** (`18:30` або `15.09 14:30`):",
-        parse_mode="Markdown",
-    )
 
-
-async def process_remind_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    dt_text = update.message.text.strip()
-    remind_text = user_states[user_id].get("text", "Нагадування")
-
-    full_text = f"{remind_text} {dt_text}"
-    await parse_and_schedule_reminder(update, context, full_text)
+def parse_weekdays(text: str):
+    found_days = []
+    lower_text = text.lower()
+    for word, day_idx in WEEKDAYS_MAP.items():
+        if word in lower_text:
+            if day_idx not in found_days:
+                found_days.append(day_idx)
+    return found_days
 
 
 async def parse_and_schedule_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE, full_text: str):
@@ -143,35 +94,49 @@ async def parse_and_schedule_reminder(update: Update, context: ContextTypes.DEFA
     now = datetime.datetime.now()
 
     repeat = "none"
+    target_weekdays = []
+
     if "щодня" in full_text.lower():
         repeat = "daily"
         full_text = re.sub(r"(?i)\s*щодня", "", full_text)
     elif "щотижня" in full_text.lower():
         repeat = "weekly"
         full_text = re.sub(r"(?i)\s*щотижня", "", full_text)
-    elif "щомісяця" in full_text.lower():
-        repeat = "monthly"
-        full_text = re.sub(r"(?i)\s*щомісяця", "", full_text)
+        target_weekdays = parse_weekdays(full_text)
+        for word in WEEKDAYS_MAP.keys():
+            full_text = re.sub(r"(?i)\b" + word + r"\b", "", full_text)
+        full_text = re.sub(r"(?i)\b(у|в|по)\b", "", full_text)
 
     match = re.search(r"(\d{1,2}\.\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}|\d{1,2}\.\d{1,2}\s+\d{1,2}:\d{2}|\d{1,2}:\d{2})$", full_text)
 
     if not match:
         await update.message.reply_text(
-            "❌ **Формат не розпізнано.** Спробуйте: `/remind Текст 18:30`",
+            "❌ **Формат часу не розпізнано.** Спробуйте: `/remind Назва 18:30` або `/remind Назва щотижня у понеділок 15:00`",
             parse_mode="Markdown",
         )
         return
 
     dt_str = match.group(1)
     reminder_title = full_text[:match.start()].strip() or "Нагадування"
+    reminder_title = re.sub(r"[\s,]+$", "", reminder_title)
 
     target_dt = None
     try:
         if re.match(r"^\d{1,2}:\d{2}$", dt_str):
             h, m = map(int, dt_str.split(":"))
             target_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
-            if target_dt <= now:
-                target_dt += datetime.timedelta(days=1)
+            
+            if repeat == "weekly" and target_weekdays:
+                days_ahead = [(d - now.weekday()) % 7 for d in target_weekdays]
+                min_days = min(days_ahead)
+                if min_days == 0 and target_dt <= now:
+                    future_days = [d for d in days_ahead if d > 0]
+                    min_days = min(future_days) if future_days else 7
+                target_dt += datetime.timedelta(days=min_days)
+            else:
+                if target_dt <= now:
+                    target_dt += datetime.timedelta(days=1)
+
         elif re.match(r"^\d{1,2}\.\d{1,2}\s+\d{1,2}:\d{2}$", dt_str):
             day_month, time_part = dt_str.split()
             d, m = map(int, day_month.split("."))
@@ -198,7 +163,13 @@ async def parse_and_schedule_reminder(update: Update, context: ContextTypes.DEFA
         send_reminder,
         when=delay,
         user_id=user_id,
-        data={"title": reminder_title, "repeat": repeat, "id": rem_id},
+        data={
+            "title": reminder_title, 
+            "repeat": repeat, 
+            "weekdays": target_weekdays, 
+            "id": rem_id,
+            "time_str": dt_str
+        },
     )
 
     if user_id not in user_reminders:
@@ -208,15 +179,26 @@ async def parse_and_schedule_reminder(update: Update, context: ContextTypes.DEFA
         "title": reminder_title,
         "time": target_dt,
         "repeat": repeat,
+        "weekdays": target_weekdays,
+        "time_str": dt_str,
         "job_name": job.name,
     }
 
     user_states.pop(user_id, None)
 
-    repeat_labels = {"none": "", "daily": " 🔁 щодня", "weekly": " 🔁 щотижня", "monthly": " 🔁 щомісяця"}
+    repeat_desc = ""
+    if repeat == "daily":
+        repeat_desc = " 🔁 щодня"
+    elif repeat == "weekly":
+        if target_weekdays:
+            days_names = [list(WEEKDAYS_MAP.keys())[list(WEEKDAYS_MAP.values()).index(d)] for d in sorted(target_weekdays)]
+            repeat_desc = f" 🔁 щотижня ({', '.join(days_names)})"
+        else:
+            repeat_desc = " 🔁 щотижня"
+
     formatted_time = target_dt.strftime("%d.%m.%Y о %H:%M")
     await update.message.reply_text(
-        f"⏰ **Нагадування встановлено!**\n\n📌 *{reminder_title}*\n📅 {formatted_time}{repeat_labels[repeat]}",
+        f"⏰ **Нагадування встановлено!**\n\n📌 *{reminder_title}*\n📅 {formatted_time}{repeat_desc}",
         parse_mode="Markdown",
     )
 
@@ -232,11 +214,10 @@ async def my_reminders_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     keyboard = []
-    repeat_labels = {"none": "", "daily": " 🔁", "weekly": " 🔁", "monthly": " 🔁"}
-
     for rem_id, data in reminders.items():
         time_str = data["time"].strftime("%d.%m %H:%M")
-        btn_text = f"⏰ {data['title']} — {time_str}{repeat_labels[data['repeat']]}"
+        rep_icon = " 🔁" if data["repeat"] != "none" else ""
+        btn_text = f"⏰ {data['title']} — {time_str}{rep_icon}"
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"editrem_{rem_id}")])
 
     await update.message.reply_text(
@@ -251,7 +232,9 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     user_id = job.user_id
     title = job.data.get("title", "Нагадування")
     repeat = job.data.get("repeat", "none")
+    weekdays = job.data.get("weekdays", [])
     rem_id = job.data.get("id")
+    time_str = job.data.get("time_str", "12:00")
 
     await context.bot.send_message(
         chat_id=user_id,
@@ -261,19 +244,34 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
 
     now = datetime.datetime.now()
     next_time = None
+
     if repeat == "daily":
         next_time = now + datetime.timedelta(days=1)
     elif repeat == "weekly":
-        next_time = now + datetime.timedelta(weeks=1)
+        if weekdays:
+            h, m = map(int, time_str.split(":"))
+            current_day = now.weekday()
+            
+            days_ahead = []
+            for d in weekdays:
+                diff = (d - current_day) % 7
+                if diff == 0:
+                    diff = 7
+                days_ahead.append(diff)
+            
+            min_diff = min(days_ahead)
+            next_time = now.replace(hour=h, minute=m, second=0, microsecond=0) + datetime.timedelta(days=min_diff)
+        else:
+            next_time = now + datetime.timedelta(weeks=1)
     elif repeat == "monthly":
         next_time = now + datetime.timedelta(days=30)
 
     if next_time:
         new_job = context.job_queue.run_once(
             send_reminder,
-            when=next_time,
+            when=next_time - now,
             user_id=user_id,
-            data={"title": title, "repeat": repeat, "id": rem_id},
+            data={"title": title, "repeat": repeat, "weekdays": weekdays, "id": rem_id, "time_str": time_str},
         )
         if user_id in user_reminders and rem_id in user_reminders[user_id]:
             user_reminders[user_id][rem_id]["time"] = next_time
@@ -289,23 +287,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     await query.answer()
 
-    if data.startswith("toggle_"):
-        idx = int(data.split("_")[1])
-        checklist_data = user_checklists.get(user_id, {})
-        items = checklist_data.get("items", [])
-        if 0 <= idx < len(items):
-            items[idx]["done"] = not items[idx]["done"]
-            text, reply_markup = render_checklist(user_id)
-            await query.edit_message_text(text=text, parse_mode="Markdown", reply_markup=reply_markup)
-
-    elif data == "delete_all":
-        user_checklists.pop(user_id, None)
-        await query.edit_message_text("🗑 **Чек-лист видалено.**")
-
-    elif data == "add_item":
-        await query.message.reply_text("✍️ Надішліть нові пункти через кому:")
-
-    elif data.startswith("editrem_"):
+    if data.startswith("editrem_"):
         rem_id = data.split("_")[1]
         remData = user_reminders.get(user_id, {}).get(rem_id)
 
@@ -345,7 +327,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             user_states[user_id] = {"step": "WAITING_FOR_TEXT"}
             await query.edit_message_text(
-                f"📝 **Зміна нагадування**\n\nВведіть новий текст:",
+                "📝 **Зміна нагадування**\n\nВведіть новий текст:",
                 parse_mode="Markdown",
             )
 
@@ -357,7 +339,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("remind", remind_command))
     application.add_handler(CommandHandler("myreminders", my_reminders_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, create_checklist))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     application.add_handler(CallbackQueryHandler(handle_buttons))
 
     application.run_polling()
